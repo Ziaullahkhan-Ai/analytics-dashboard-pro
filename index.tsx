@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { createRoot } from 'react-dom/client';
 import { 
   LineChart, Line, AreaChart, Area, BarChart, Bar, PieChart, Pie, Cell,
@@ -22,14 +22,25 @@ import {
   BrainCircuit,
   AlertCircle,
   RefreshCw,
-  MoreVertical
+  MoreVertical,
+  Send,
+  MessageSquare,
+  Settings,
+  Bell,
+  ArrowUpRight,
+  Database,
+  Cpu,
+  ShieldCheck,
+  Zap
 } from 'lucide-react';
-import { GoogleGenAI } from "@google/genai";
+import { GoogleGenAI, Chat, GenerateContentResponse } from "@google/genai";
 
-// --- Types & Constants ---
+// --- Constants & Config ---
+const COLORS = ['#6366f1', '#10b981', '#f43f5e', '#f59e0b', '#8b5cf6', '#06b6d4'];
+const API_URL = 'https://disease.sh/v3/covid-19';
 
+// --- Types ---
 interface GlobalStats {
-  updated: number;
   cases: number;
   todayCases: number;
   deaths: number;
@@ -37,633 +48,671 @@ interface GlobalStats {
   recovered: number;
   todayRecovered: number;
   active: number;
-  critical: number;
-  casesPerOneMillion: number;
-  deathsPerOneMillion: number;
-  tests: number;
-  testsPerOneMillion: number;
   population: number;
-  oneCasePerPeople: number;
-  oneDeathPerPeople: number;
-  oneTestPerPeople: number;
-  activePerOneMillion: number;
-  recoveredPerOneMillion: number;
-  criticalPerOneMillion: number;
-  affectedCountries: number;
+  updated: number;
 }
 
 interface CountryData {
   country: string;
-  countryInfo: {
-    iso2: string;
-    iso3: string;
-    flag: string;
-  };
+  countryInfo: { iso2: string; flag: string; };
   cases: number;
   deaths: number;
   recovered: number;
   active: number;
-  population: number;
   continent: string;
+  population: number;
 }
 
-interface HistoricalData {
-  cases: Record<string, number>;
-  deaths: Record<string, number>;
-  recovered: Record<string, number>;
+interface ChatMessage {
+  role: 'user' | 'model';
+  text: string;
+  timestamp: Date;
+  isStreaming?: boolean;
 }
 
-const COLORS = ['#6366f1', '#10b981', '#f43f5e', '#f59e0b', '#8b5cf6', '#06b6d4'];
-
-// --- Utility Functions ---
-
+// --- Utilities ---
 const formatNumber = (num: number) => {
+  if (num >= 1000000000) return (num / 1000000000).toFixed(1) + 'B';
   if (num >= 1000000) return (num / 1000000).toFixed(1) + 'M';
   if (num >= 1000) return (num / 1000).toFixed(1) + 'K';
-  return num.toString();
+  return num.toLocaleString();
 };
 
-const formatDate = (dateStr: string) => {
-  const date = new Date(dateStr);
-  return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+const exportToCSV = (data: any[], filename: string) => {
+  if (!data || !data.length) return;
+  const headers = Object.keys(data[0]).join(',');
+  const rows = data.map(obj => Object.values(obj).join(',')).join('\n');
+  const csvContent = "data:text/csv;charset=utf-8," + headers + "\n" + rows;
+  const encodedUri = encodeURI(csvContent);
+  const link = document.createElement("a");
+  link.setAttribute("href", encodedUri);
+  link.setAttribute("download", `${filename}.csv`);
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
 };
 
-// --- Mock Auth Service ---
-
-const useAuth = () => {
-  const [user, setUser] = useState<{ name: string; email: string } | null>(() => {
-    const saved = localStorage.getItem('nexus_user');
-    return saved ? JSON.parse(saved) : null;
-  });
-
-  const login = (email: string) => {
-    const newUser = { name: email.split('@')[0], email };
-    setUser(newUser);
-    localStorage.setItem('nexus_user', JSON.stringify(newUser));
-  };
-
-  const logout = () => {
-    setUser(null);
-    localStorage.removeItem('nexus_user');
-  };
-
-  return { user, login, logout };
-};
-
-// --- Components ---
-
+// --- Sub-Components ---
 const StatCard = ({ title, value, change, icon: Icon, colorClass }: any) => (
-  <div className="glass-panel p-6 rounded-2xl shadow-lg border border-slate-700/50 hover:border-slate-500/50 transition-all duration-300">
-    <div className="flex items-center justify-between mb-4">
-      <div className={`p-3 rounded-xl ${colorClass}`}>
+  <div className="glass-panel p-6 rounded-3xl shadow-lg border border-slate-700/30 hover:border-indigo-500/50 transition-all duration-500 group relative overflow-hidden">
+    <div className="absolute -right-4 -bottom-4 opacity-5 group-hover:opacity-10 transition-opacity">
+      <Icon size={120} />
+    </div>
+    <div className="flex items-center justify-between mb-4 relative z-10">
+      <div className={`p-3 rounded-2xl ${colorClass} shadow-lg shadow-indigo-500/10 group-hover:scale-110 transition-transform`}>
         <Icon size={24} className="text-white" />
       </div>
       {change && (
-        <span className={`text-sm font-medium ${change.startsWith('+') ? 'text-emerald-400' : 'text-rose-400'}`}>
+        <span className={`text-[10px] font-black px-2 py-1 rounded-full uppercase tracking-tighter ${change.startsWith('+') ? 'bg-emerald-500/10 text-emerald-400' : 'bg-rose-500/10 text-rose-400'}`}>
           {change}
         </span>
       )}
     </div>
-    <h3 className="text-slate-400 text-sm font-medium mb-1">{title}</h3>
-    <p className="text-2xl font-bold text-white tracking-tight">{formatNumber(value)}</p>
-  </div>
-);
-
-const SectionHeader = ({ title, description, actions }: any) => (
-  <div className="flex flex-col md:flex-row md:items-center justify-between mb-6 gap-4">
-    <div>
-      <h2 className="text-2xl font-bold text-white">{title}</h2>
-      <p className="text-slate-400 text-sm mt-1">{description}</p>
-    </div>
-    <div className="flex items-center gap-3">
-      {actions}
+    <h3 className="text-slate-500 text-xs font-bold uppercase tracking-widest mb-1 relative z-10">{title}</h3>
+    <div className="flex items-end gap-2 relative z-10">
+      <p className="text-3xl font-black text-white tracking-tighter">{formatNumber(value)}</p>
     </div>
   </div>
 );
 
 const App = () => {
-  const { user, login, logout } = useAuth();
+  // Navigation & UI State
+  const [view, setView] = useState<'dashboard' | 'world' | 'trends' | 'settings'>('dashboard');
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [isChatOpen, setIsChatOpen] = useState(false);
+  const [notifications, setNotifications] = useState<{id: number, text: string}[]>([]);
+  const [systemStatus, setSystemStatus] = useState('Stable');
   
+  // App Config Settings
+  const [config, setConfig] = useState({
+    theme: 'Midnight Deep',
+    refreshRate: 30,
+    aiModel: 'Gemini 3 Flash',
+    notifications: true
+  });
+
   // Data State
   const [globalStats, setGlobalStats] = useState<GlobalStats | null>(null);
   const [countries, setCountries] = useState<CountryData[]>([]);
-  const [historical, setHistorical] = useState<HistoricalData | null>(null);
-  
-  // Filters State
+  const [historical, setHistorical] = useState<any>(null);
+  const [loading, setLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState('');
-  const [sortKey, setSortKey] = useState<keyof CountryData>('cases');
-  const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc');
-  const [timeRange, setTimeRange] = useState('30');
   
-  // AI Insights State
-  const [aiInsight, setAiInsight] = useState<string | null>(null);
-  const [isAiLoading, setIsAiLoading] = useState(false);
+  // Chat State
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
+  const [chatInput, setChatInput] = useState('');
+  const [isAiTyping, setIsAiTyping] = useState(false);
+  const chatEndRef = useRef<HTMLDivElement>(null);
+  const chatSessionRef = useRef<Chat | null>(null);
+
+  // Auth Simulation
+  const [user, setUser] = useState(() => JSON.parse(localStorage.getItem('nexus_auth') || 'null'));
+
+  const addNotification = useCallback((text: string) => {
+    if (!config.notifications) return;
+    const id = Date.now();
+    setNotifications(prev => [...prev, { id, text }]);
+    setTimeout(() => {
+      setNotifications(prev => prev.filter(n => n.id !== id));
+    }, 5000);
+  }, [config.notifications]);
 
   const fetchData = useCallback(async () => {
     setLoading(true);
-    setError(null);
+    setSystemStatus('Syncing');
     try {
-      const [globalRes, countriesRes, historicalRes] = await Promise.all([
-        fetch('https://disease.sh/v3/covid-19/all'),
-        fetch('https://disease.sh/v3/covid-19/countries'),
-        fetch(`https://disease.sh/v3/covid-19/historical/all?lastdays=${timeRange}`)
+      const [gRes, cRes, hRes] = await Promise.all([
+        fetch(`${API_URL}/all`),
+        fetch(`${API_URL}/countries`),
+        fetch(`${API_URL}/historical/all?lastdays=60`)
       ]);
-
-      if (!globalRes.ok || !countriesRes.ok || !historicalRes.ok) throw new Error('API failed to respond');
-
-      const gData = await globalRes.json();
-      const cData = await countriesRes.json();
-      const hData = await historicalRes.json();
-
+      const gData = await gRes.json();
+      const cData = await cRes.json();
+      const hData = await hRes.json();
+      
       setGlobalStats(gData);
       setCountries(cData);
       setHistorical(hData);
+      setSystemStatus('Active');
+      addNotification("Quantum Data Link Established.");
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'An error occurred');
+      setSystemStatus('Error');
+      addNotification("Critical: API Cluster Unresponsive.");
     } finally {
       setLoading(false);
     }
-  }, [timeRange]);
+  }, [addNotification]);
 
   useEffect(() => {
     fetchData();
-  }, [fetchData]);
+    const interval = setInterval(() => {
+      if (config.refreshRate > 0) fetchData();
+    }, config.refreshRate * 1000);
+    return () => clearInterval(interval);
+  }, [fetchData, config.refreshRate]);
 
-  const filteredAndSortedCountries = useMemo(() => {
-    return countries
-      .filter(c => c.country.toLowerCase().includes(searchTerm.toLowerCase()))
-      .sort((a, b) => {
-        const valA = a[sortKey] as number;
-        const valB = b[sortKey] as number;
-        return sortOrder === 'desc' ? valB - valA : valA - valB;
-      })
-      .slice(0, 100);
-  }, [countries, searchTerm, sortKey, sortOrder]);
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [chatMessages]);
 
-  const chartData = useMemo(() => {
-    if (!historical) return [];
-    return Object.keys(historical.cases).map(date => ({
-      date: formatDate(date),
-      cases: historical.cases[date],
-      deaths: historical.deaths[date],
-      recovered: historical.recovered[date]
-    }));
-  }, [historical]);
+  const handleLogin = (e: React.FormEvent) => {
+    e.preventDefault();
+    const data = new FormData(e.target as HTMLFormElement);
+    const email = data.get('email') as string;
+    const userData = { email, name: email.split('@')[0].toUpperCase(), level: 'L7 COMMANDER' };
+    setUser(userData);
+    localStorage.setItem('nexus_auth', JSON.stringify(userData));
+    addNotification(`Authentication Successful. Welcome ${userData.name}.`);
+  };
 
-  const generateAIInsights = async () => {
-    if (!globalStats) return;
-    setIsAiLoading(true);
+  const handleLogout = () => {
+    setUser(null);
+    localStorage.removeItem('nexus_auth');
+    addNotification("Session Purged.");
+  };
+
+  // --- Premium AI Chatbot Logic ---
+  const initChat = async () => {
+    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY || '' });
+    const chat = ai.chats.create({
+      model: 'gemini-3-flash-preview',
+      config: {
+        systemInstruction: `You are Nexus Assistant (AX-9), a world-class health intelligence agent. 
+        Current Stats: Cases: ${globalStats?.cases}, Active: ${globalStats?.active}, Deaths: ${globalStats?.deaths}.
+        Total Countries Managed: ${countries.length}.
+        Your persona: Professional, data-driven, futuristic, and helpful. 
+        You use professional health terminology. You can analyze trends and provide actionable summaries.`,
+      }
+    });
+    chatSessionRef.current = chat;
+  };
+
+  const sendMessage = async () => {
+    if (!chatInput.trim() || isAiTyping) return;
+    
+    const userMsg: ChatMessage = { role: 'user', text: chatInput, timestamp: new Date() };
+    setChatMessages(prev => [...prev, userMsg]);
+    setChatInput('');
+    setIsAiTyping(true);
+
     try {
-      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY || '' });
-      const prompt = `Analyze the following global health data: 
-        Total Cases: ${globalStats.cases}
-        Active: ${globalStats.active}
-        Recovered: ${globalStats.recovered}
-        Deaths: ${globalStats.deaths}
-        Total Population: ${globalStats.population}
-        Provide a concise 3-bullet executive summary with trends and one key observation. Keep it professional and analytical.`;
+      if (!chatSessionRef.current) await initChat();
       
-      const response = await ai.models.generateContent({
-        model: "gemini-3-flash-preview",
-        contents: prompt,
-        config: { temperature: 0.7 }
+      const stream = await chatSessionRef.current!.sendMessageStream({ message: userMsg.text });
+      
+      let fullText = '';
+      setChatMessages(prev => [...prev, { role: 'model', text: '', timestamp: new Date(), isStreaming: true }]);
+
+      for await (const chunk of stream) {
+        fullText += (chunk as GenerateContentResponse).text || '';
+        setChatMessages(prev => {
+          const updated = [...prev];
+          const last = updated[updated.length - 1];
+          if (last.role === 'model') {
+            last.text = fullText;
+          }
+          return updated;
+        });
+      }
+      
+      setChatMessages(prev => {
+        const updated = [...prev];
+        const last = updated[updated.length - 1];
+        if (last.role === 'model') last.isStreaming = false;
+        return updated;
       });
-      
-      setAiInsight(response.text);
+
     } catch (err) {
-      console.error("AI Insight Error:", err);
-      setAiInsight("Unable to generate insights at this time. Please check API configuration.");
+      setChatMessages(prev => [...prev, { role: 'model', text: 'Neural link failed. Attempting reconnection...', timestamp: new Date() }]);
     } finally {
-      setIsAiLoading(false);
+      setIsAiTyping(false);
     }
   };
 
-  const toggleSort = (key: keyof CountryData) => {
-    if (sortKey === key) {
-      setSortOrder(sortOrder === 'desc' ? 'asc' : 'desc');
-    } else {
-      setSortKey(key);
-      setSortOrder('desc');
-    }
-  };
+  // --- Views ---
+  const DashboardView = () => (
+    <div className="space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-700">
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+        {globalStats && (
+          <>
+            <StatCard title="Confirmed Vectors" value={globalStats.cases} change={`+${formatNumber(globalStats.todayCases)}`} icon={Activity} colorClass="bg-indigo-600" />
+            <StatCard title="Restored Vitality" value={globalStats.recovered} change={`+${formatNumber(globalStats.todayRecovered)}`} icon={Users} colorClass="bg-emerald-600" />
+            <StatCard title="System Casualties" value={globalStats.deaths} change={`+${formatNumber(globalStats.todayDeaths)}`} icon={Skull} colorClass="bg-rose-600" />
+            <StatCard title="Active Strain" value={globalStats.active} icon={Zap} colorClass="bg-amber-600" />
+          </>
+        )}
+      </div>
 
+      <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
+        <div className="xl:col-span-2 glass-panel p-8 rounded-[2.5rem] min-h-[450px] shadow-2xl">
+          <div className="flex justify-between items-center mb-10">
+            <div>
+              <h3 className="text-2xl font-black text-white flex items-center gap-3">
+                <TrendingUp className="text-indigo-400" /> Transmission Waveform
+              </h3>
+              <p className="text-slate-500 text-sm">60-day predictive data modeling</p>
+            </div>
+            <div className="flex bg-slate-900/50 p-1.5 rounded-2xl border border-slate-800">
+              <button className="px-5 py-2 bg-indigo-600 rounded-xl text-xs font-bold text-white shadow-lg shadow-indigo-500/20">60D</button>
+              <button className="px-5 py-2 text-slate-500 hover:text-white text-xs font-bold transition-all">ALL TIME</button>
+            </div>
+          </div>
+          <div className="h-[320px]">
+            <ResponsiveContainer width="100%" height="100%">
+              <AreaChart data={historical ? Object.keys(historical.cases).map(date => ({ 
+                date, 
+                cases: historical.cases[date],
+                deaths: historical.deaths[date]
+              })) : []}>
+                <defs>
+                  <linearGradient id="chartGradient" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%" stopColor="#6366f1" stopOpacity={0.6}/>
+                    <stop offset="95%" stopColor="#6366f1" stopOpacity={0}/>
+                  </linearGradient>
+                </defs>
+                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#1e293b" strokeOpacity={0.5} />
+                <XAxis dataKey="date" hide />
+                <YAxis stroke="#475569" fontSize={10} tickFormatter={formatNumber} axisLine={false} tickLine={false} />
+                <Tooltip 
+                  cursor={{ stroke: '#6366f1', strokeWidth: 2 }}
+                  contentStyle={{ backgroundColor: '#0f172a', border: '1px solid #1e293b', borderRadius: '16px', color: '#fff' }} 
+                />
+                <Area type="monotone" dataKey="cases" stroke="#6366f1" strokeWidth={4} fillOpacity={1} fill="url(#chartGradient)" />
+                <Area type="monotone" dataKey="deaths" stroke="#f43f5e" fill="transparent" strokeWidth={2} />
+              </AreaChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
+
+        <div className="glass-panel p-8 rounded-[2.5rem] flex flex-col justify-between shadow-2xl relative overflow-hidden group">
+          <div className="absolute top-0 right-0 p-4">
+             <ShieldCheck size={40} className="text-indigo-500/20 group-hover:scale-125 transition-transform duration-700" />
+          </div>
+          <div className="space-y-6">
+            <h3 className="text-2xl font-black text-white">System Integrity</h3>
+            <div className="space-y-3">
+              {[
+                { label: 'Neural Throughput', value: '1.2 GB/s', color: 'text-emerald-400' },
+                { label: 'Data Latency', value: '12ms', color: 'text-indigo-400' },
+                { label: 'Secure Encryption', value: 'AES-256', color: 'text-emerald-400' },
+                { label: 'Cloud Synchrony', value: 'Perfect', color: 'text-indigo-400' },
+              ].map((stat, i) => (
+                <div key={i} className="flex justify-between items-center p-4 bg-slate-900/40 rounded-2xl border border-slate-800/50 hover:bg-slate-800/50 transition-colors">
+                  <span className="text-slate-500 text-xs font-bold uppercase tracking-widest">{stat.label}</span>
+                  <span className={`text-sm font-black ${stat.color}`}>{stat.value}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+          <button 
+            onClick={() => addNotification("Diagnostic Sequence Initiated...")}
+            className="w-full mt-8 py-4 bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white font-black rounded-2xl shadow-2xl shadow-indigo-500/30 transition-all flex items-center justify-center gap-3 active:scale-95"
+          >
+            <Cpu size={20} /> RUN FULL SCAN
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+
+  const WorldView = () => (
+    <div className="glass-panel rounded-[2.5rem] overflow-hidden animate-in fade-in slide-in-from-right-4 duration-700 shadow-2xl">
+      <div className="p-8 border-b border-slate-800 flex flex-col sm:flex-row justify-between items-center gap-6 bg-slate-900/20">
+        <div>
+          <h2 className="text-3xl font-black text-white">Registry Center</h2>
+          <p className="text-slate-500 text-sm mt-1 uppercase tracking-widest font-bold">Global Bio-Data Streams</p>
+        </div>
+        <div className="flex gap-4 w-full sm:w-auto">
+          <div className="relative flex-1 sm:w-72">
+            <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-500" size={18} />
+            <input 
+              type="text" 
+              placeholder="Filter by Territory..." 
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+              className="w-full bg-slate-900 border border-slate-800 rounded-2xl pl-12 pr-4 py-3 text-sm text-white focus:ring-2 focus:ring-indigo-500 transition-all outline-none shadow-inner"
+            />
+          </div>
+          <button 
+            onClick={() => exportToCSV(countries, 'nexus_full_registry')}
+            className="p-3 bg-indigo-600 hover:bg-indigo-500 text-white rounded-2xl shadow-lg transition-all active:scale-90"
+          >
+            <Download size={22} />
+          </button>
+        </div>
+      </div>
+      <div className="overflow-x-auto no-scrollbar">
+        <table className="w-full text-left border-collapse">
+          <thead className="bg-slate-950/50 text-[10px] uppercase tracking-widest text-slate-600 font-black">
+            <tr>
+              <th className="px-10 py-5">Territory</th>
+              <th className="px-10 py-5">Total Population</th>
+              <th className="px-10 py-5">Verified Cases</th>
+              <th className="px-10 py-5">Vital Restoration</th>
+              <th className="px-10 py-5">Loss Metric</th>
+              <th className="px-10 py-5">Current Threat</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-slate-800/30">
+            {countries.filter(c => c.country.toLowerCase().includes(searchTerm.toLowerCase())).slice(0, 80).map((c, i) => (
+              <tr key={i} className="hover:bg-indigo-500/5 transition-all group">
+                <td className="px-10 py-6">
+                  <div className="flex items-center gap-4">
+                    <div className="w-10 h-7 rounded-lg overflow-hidden shadow-2xl border border-slate-700/50">
+                        <img src={c.countryInfo.flag} className="w-full h-full object-cover" alt="" />
+                    </div>
+                    <span className="text-sm font-black text-white group-hover:text-indigo-400 transition-colors uppercase tracking-tight">{c.country}</span>
+                  </div>
+                </td>
+                <td className="px-10 py-6 text-sm text-slate-500 font-bold">{formatNumber(c.population)}</td>
+                <td className="px-10 py-6 text-sm text-slate-200 font-black">{formatNumber(c.cases)}</td>
+                <td className="px-10 py-6 text-sm text-emerald-400 font-black tracking-tighter">{formatNumber(c.recovered)}</td>
+                <td className="px-10 py-6 text-sm text-rose-500 font-black">{formatNumber(c.deaths)}</td>
+                <td className="px-10 py-6">
+                  <div className="flex items-center gap-2">
+                    <div className={`w-2 h-2 rounded-full ${c.active > 500000 ? 'bg-rose-500 animate-pulse' : 'bg-emerald-500'}`}></div>
+                    <span className={`text-[10px] font-black uppercase tracking-widest ${c.active > 500000 ? 'text-rose-500' : 'text-emerald-500'}`}>
+                        {c.active > 500000 ? 'Level 4' : 'Level 1'}
+                    </span>
+                  </div>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+
+  // --- Main Auth & Wrapper ---
   if (!user) {
     return (
-      <div className="h-screen flex items-center justify-center bg-slate-950 px-4">
-        <div className="w-full max-w-md p-8 glass-panel rounded-3xl shadow-2xl border border-slate-800 animate-in fade-in zoom-in duration-500">
-          <div className="flex flex-col items-center mb-8">
-            <div className="w-16 h-16 bg-indigo-600 rounded-2xl flex items-center justify-center mb-4 shadow-lg shadow-indigo-500/20">
-              <LayoutDashboard size={32} className="text-white" />
+      <div className="h-screen w-full flex items-center justify-center bg-[#020617] p-6">
+        <div className="w-full max-w-lg p-12 glass-panel rounded-[3rem] border-slate-800 shadow-2xl relative overflow-hidden group">
+          <div className="absolute top-0 left-0 w-full h-2 bg-gradient-to-r from-indigo-500 via-purple-500 to-indigo-500 animate-gradient-x"></div>
+          <div className="flex flex-col items-center mb-10 text-center">
+            <div className="w-20 h-20 bg-indigo-600 rounded-3xl flex items-center justify-center mb-6 shadow-2xl shadow-indigo-500/40 group-hover:rotate-12 transition-transform duration-500">
+              <LayoutDashboard size={40} className="text-white" />
             </div>
-            <h1 className="text-3xl font-bold text-white tracking-tight">Nexus Analytics</h1>
-            <p className="text-slate-400 mt-2 text-center text-sm">Please sign in to access the command center.</p>
+            <h1 className="text-4xl font-black text-white tracking-tighter mb-2">NEXUS COMMAND</h1>
+            <p className="text-slate-500 text-sm font-bold uppercase tracking-[0.3em]">Bios-Grid Access Layer</p>
           </div>
-          <form onSubmit={(e) => {
-            e.preventDefault();
-            const formData = new FormData(e.currentTarget);
-            login(formData.get('email') as string);
-          }} className="space-y-4">
-            <div>
-              <label className="block text-sm font-medium text-slate-400 mb-1">Professional Email</label>
-              <input 
-                name="email"
-                type="email" 
-                required 
-                defaultValue="analyst@nexus.ai"
-                className="w-full bg-slate-900/50 border border-slate-700 rounded-xl px-4 py-3 text-white focus:outline-none focus:ring-2 focus:ring-indigo-500/50 transition-all"
-                placeholder="you@company.com"
-              />
+          <form onSubmit={handleLogin} className="space-y-6">
+            <div className="space-y-2">
+              <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest ml-1">Commander ID</label>
+              <input name="email" type="email" required defaultValue="commander@nexus.ai" className="w-full bg-slate-900 border border-slate-800 rounded-2xl px-6 py-5 text-white focus:ring-2 focus:ring-indigo-500 transition-all outline-none font-bold" />
             </div>
-            <div>
-              <label className="block text-sm font-medium text-slate-400 mb-1">Access Token</label>
-              <input 
-                type="password" 
-                defaultValue="••••••••"
-                className="w-full bg-slate-900/50 border border-slate-700 rounded-xl px-4 py-3 text-white focus:outline-none focus:ring-2 focus:ring-indigo-500/50 transition-all"
-                placeholder="Enter password"
-              />
+            <div className="space-y-2">
+              <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest ml-1">Quantum Token</label>
+              <input type="password" defaultValue="password" className="w-full bg-slate-900 border border-slate-800 rounded-2xl px-6 py-5 text-white focus:ring-2 focus:ring-indigo-500 transition-all outline-none" />
             </div>
-            <button 
-              type="submit" 
-              className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-3 rounded-xl shadow-lg shadow-indigo-500/20 transition-all active:scale-95"
-            >
-              Authorize Session
+            <button className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-black py-5 rounded-2xl shadow-2xl shadow-indigo-500/40 active:scale-95 transition-all text-lg tracking-widest uppercase">
+              Establish Link
             </button>
           </form>
-          <div className="mt-8 pt-6 border-t border-slate-800 text-center">
-            <p className="text-xs text-slate-500">Hackathon Edition v1.0 • Built with Google GenAI SDK</p>
-          </div>
+          <p className="text-center text-[9px] text-slate-700 mt-12 uppercase tracking-[0.4em] font-black">Encrypted via Nexus v9.4 Protocol</p>
         </div>
       </div>
     );
   }
 
   return (
-    <div className="flex h-screen overflow-hidden bg-slate-950 font-sans">
-      {/* --- Sidebar --- */}
-      <aside className={`fixed inset-y-0 left-0 z-50 w-64 glass-panel border-r border-slate-800 transition-transform duration-300 lg:relative lg:translate-x-0 ${isSidebarOpen ? 'translate-x-0' : '-translate-x-full'}`}>
-        <div className="flex flex-col h-full">
-          <div className="p-6 flex items-center gap-3">
-            <div className="w-10 h-10 bg-indigo-600 rounded-xl flex items-center justify-center shadow-lg shadow-indigo-500/20">
-              <LayoutDashboard size={20} className="text-white" />
+    <div className="flex h-screen bg-[#020617] text-slate-200 overflow-hidden font-sans selection:bg-indigo-500/30">
+      {/* Sidebar */}
+      <aside className={`fixed lg:relative z-[60] w-80 h-full glass-panel border-r border-slate-800/50 transition-transform duration-500 ${isSidebarOpen ? 'translate-x-0' : '-translate-x-full'}`}>
+        <div className="flex flex-col h-full p-8">
+          <div className="flex items-center gap-4 mb-14 px-2 group cursor-pointer" onClick={() => setView('dashboard')}>
+            <div className="w-12 h-12 bg-indigo-600 rounded-2xl flex items-center justify-center shadow-2xl shadow-indigo-500/30 group-hover:scale-110 transition-transform">
+              <Database size={24} className="text-white" />
             </div>
             <div>
-              <h1 className="text-lg font-bold text-white tracking-tight">Nexus</h1>
-              <p className="text-[10px] uppercase tracking-widest text-slate-500 font-bold">Analytics Engine</p>
+              <h2 className="text-2xl font-black text-white tracking-tighter">NEXUS</h2>
+              <span className="text-[10px] font-black text-indigo-400 uppercase tracking-[0.2em]">OS V2.0</span>
             </div>
           </div>
 
-          <nav className="flex-1 px-4 py-6 space-y-1 overflow-y-auto no-scrollbar">
+          <nav className="flex-1 space-y-3">
             {[
-              { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
-              { id: 'world', label: 'World View', icon: Globe },
-              { id: 'trends', label: 'Market Trends', icon: TrendingUp },
-              { id: 'metrics', label: 'Key Metrics', icon: Activity },
-              { id: 'security', label: 'Auth Status', icon: Users },
-            ].map((item) => (
-              <button
+              { id: 'dashboard', label: 'CORE Dashboard', icon: LayoutDashboard },
+              { id: 'world', label: 'Global Registry', icon: Globe },
+              { id: 'trends', label: 'Analytics Nexus', icon: BrainCircuit },
+              { id: 'settings', label: 'Configuration', icon: Settings },
+            ].map((item: any) => (
+              <button 
                 key={item.id}
-                className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all duration-200 ${item.id === 'dashboard' ? 'bg-indigo-600/10 text-indigo-400 border border-indigo-500/20' : 'text-slate-400 hover:text-white hover:bg-slate-800/50'}`}
+                onClick={() => setView(item.id)}
+                className={`w-full flex items-center gap-5 px-6 py-5 rounded-[1.5rem] transition-all duration-500 group ${view === item.id ? 'bg-indigo-600 text-white shadow-2xl shadow-indigo-500/40' : 'text-slate-500 hover:bg-slate-900/50 hover:text-white'}`}
               >
-                <item.icon size={20} />
-                <span className="font-medium text-sm">{item.label}</span>
+                <item.icon size={22} className={view === item.id ? 'animate-pulse' : 'group-hover:scale-110 transition-transform'} />
+                <span className="font-black text-xs uppercase tracking-widest">{item.label}</span>
               </button>
             ))}
           </nav>
 
-          <div className="p-4 border-t border-slate-800">
-            <div className="flex items-center gap-3 p-3 glass-panel rounded-xl mb-3">
-              <div className="w-8 h-8 rounded-full bg-slate-700 flex items-center justify-center text-xs font-bold text-white">
-                {user.name[0].toUpperCase()}
+          <div className="mt-auto pt-8 border-t border-slate-800/50">
+            <div className="p-5 bg-slate-900/60 rounded-[2rem] border border-slate-800/80 shadow-2xl group transition-all">
+              <div className="flex items-center gap-4 mb-4">
+                <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-indigo-500 to-purple-500 flex items-center justify-center font-black text-xl text-white shadow-lg">
+                  {user.name[0]}
+                </div>
+                <div>
+                  <p className="text-xs font-black text-white tracking-widest">{user.name}</p>
+                  <p className="text-[10px] text-indigo-400 font-bold uppercase">{user.level}</p>
+                </div>
               </div>
-              <div className="flex-1 overflow-hidden">
-                <p className="text-xs font-bold text-white truncate">{user.name}</p>
-                <p className="text-[10px] text-slate-500 truncate">{user.email}</p>
-              </div>
-              <button onClick={logout} className="text-slate-500 hover:text-rose-400 transition-colors">
-                <LogOut size={16} />
+              <button onClick={handleLogout} className="w-full text-center py-3 bg-slate-950/50 hover:bg-rose-500 hover:text-white text-[9px] font-black text-rose-500 border border-rose-500/20 rounded-xl transition-all uppercase tracking-widest">
+                Sever Session
               </button>
             </div>
-            <p className="text-[10px] text-center text-slate-600">© 2024 Nexus Solutions Inc.</p>
           </div>
         </div>
       </aside>
 
-      {/* --- Main Content --- */}
-      <main className="flex-1 flex flex-col h-full overflow-hidden">
-        {/* Header */}
-        <header className="h-16 flex items-center justify-between px-6 border-b border-slate-800 bg-slate-950/50 backdrop-blur-md z-40">
-          <div className="flex items-center gap-4">
-            <button onClick={() => setIsSidebarOpen(!isSidebarOpen)} className="lg:hidden p-2 text-slate-400 hover:text-white transition-colors">
-              <Menu size={24} />
+      {/* Main Area */}
+      <main className="flex-1 flex flex-col min-w-0 relative">
+        <header className="h-24 flex items-center justify-between px-10 bg-[#020617]/40 backdrop-blur-3xl border-b border-slate-800/30 sticky top-0 z-50">
+          <div className="flex items-center gap-8">
+            <button onClick={() => setIsSidebarOpen(!isSidebarOpen)} className="p-3 text-slate-500 hover:text-white hover:bg-slate-900 rounded-2xl transition-all">
+              <Menu size={28} />
             </button>
-            <div className="relative group hidden sm:block">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 group-focus-within:text-indigo-400 transition-colors" size={18} />
-              <input 
-                type="text" 
-                placeholder="Search global datasets..."
-                className="bg-slate-900/50 border border-slate-800 rounded-full pl-10 pr-4 py-1.5 text-sm text-slate-300 focus:outline-none focus:ring-2 focus:ring-indigo-500/50 w-64 transition-all"
-              />
+            <div className="hidden sm:block">
+               <h1 className="text-2xl font-black text-white uppercase tracking-tighter">{view}</h1>
+               <p className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">Node Path: 0x4f..{view}</p>
             </div>
           </div>
-          
-          <div className="flex items-center gap-4">
+
+          <div className="flex items-center gap-6">
+            <div className="hidden md:flex items-center gap-3 px-5 py-2.5 bg-slate-950/50 border border-slate-800/80 rounded-2xl text-[10px] font-black tracking-widest">
+              <div className={`w-2.5 h-2.5 rounded-full ${systemStatus === 'Active' ? 'bg-emerald-500' : 'bg-amber-500'} animate-pulse shadow-glow`}></div>
+              {systemStatus.toUpperCase()} STREAM
+            </div>
+            <div className="relative group">
+              <Bell className="text-slate-500 cursor-pointer hover:text-white transition-all hover:scale-110" size={22} />
+              {notifications.length > 0 && <div className="absolute -top-1 -right-1 w-2.5 h-2.5 bg-rose-500 rounded-full animate-ping"></div>}
+            </div>
+            <div className="h-8 w-[1px] bg-slate-800/80"></div>
             <button 
-              onClick={fetchData}
-              className={`p-2 text-slate-400 hover:text-indigo-400 transition-colors ${loading ? 'animate-spin' : ''}`}
+              onClick={() => setIsChatOpen(!isChatOpen)}
+              className={`p-4 rounded-2xl transition-all duration-500 shadow-2xl relative ${isChatOpen ? 'bg-indigo-600 text-white scale-110' : 'bg-slate-900 text-slate-500 hover:bg-slate-800 hover:text-white'}`}
             >
-              <RefreshCw size={20} />
-            </button>
-            <div className="h-6 w-[1px] bg-slate-800 mx-2"></div>
-            <button 
-              onClick={generateAIInsights}
-              disabled={isAiLoading}
-              className="flex items-center gap-2 bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white text-xs font-bold px-4 py-2 rounded-lg shadow-lg shadow-indigo-500/20 transition-all disabled:opacity-50"
-            >
-              {isAiLoading ? <RefreshCw size={14} className="animate-spin" /> : <BrainCircuit size={14} />}
-              AI INSIGHTS
+              <MessageSquare size={24} />
+              {!isChatOpen && <div className="absolute -top-1 -right-1 w-3 h-3 bg-indigo-500 rounded-full animate-bounce"></div>}
             </button>
           </div>
         </header>
 
-        {/* Scrollable Content Area */}
-        <div className="flex-1 overflow-y-auto p-6 space-y-8 bg-slate-950/20 no-scrollbar">
-          
-          {error && (
-            <div className="bg-rose-500/10 border border-rose-500/20 p-4 rounded-xl flex items-center gap-3 text-rose-400">
-              <AlertCircle size={20} />
-              <p className="text-sm font-medium">{error}</p>
+        {/* Notifications Tray */}
+        <div className="fixed top-28 right-10 z-[100] flex flex-col gap-4 pointer-events-none">
+          {notifications.map(n => (
+            <div key={n.id} className="bg-slate-900 border border-indigo-500/40 text-white text-xs px-8 py-5 rounded-[2rem] shadow-[0_20px_50px_rgba(0,0,0,0.5)] animate-in slide-in-from-right-12 fade-in duration-500 pointer-events-auto flex items-center gap-4">
+              <Zap size={18} className="text-indigo-400 animate-pulse" />
+              <span className="font-bold tracking-tight">{n.text}</span>
+            </div>
+          ))}
+        </div>
+
+        {/* Dynamic View Router */}
+        <div className="flex-1 overflow-y-auto p-10 no-scrollbar scroll-smooth">
+          {loading && view !== 'settings' ? (
+             <div className="flex flex-col items-center justify-center h-full gap-8">
+                <div className="relative">
+                  <div className="w-24 h-24 border-8 border-indigo-500/10 border-t-indigo-500 rounded-full animate-spin"></div>
+                  <Database size={32} className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 text-indigo-400 animate-pulse" />
+                </div>
+                <div className="text-center">
+                  <p className="text-xl font-black text-white tracking-widest uppercase mb-2">Syncing Nexus Core</p>
+                  <p className="text-xs text-slate-500 font-bold animate-pulse">Establishing secure link to global bio-registry...</p>
+                </div>
+             </div>
+          ) : (
+            <div className="max-w-[1600px] mx-auto">
+              {view === 'dashboard' && <DashboardView />}
+              {view === 'world' && <WorldView />}
+              {view === 'trends' && (
+                <div className="flex flex-col items-center justify-center min-h-[70vh] text-center space-y-8 animate-in zoom-in-95 duration-700">
+                  <div className="p-10 bg-indigo-600/5 rounded-full text-indigo-400 border border-indigo-500/10 shadow-2xl relative">
+                    <BrainCircuit size={80} className="animate-bounce" />
+                    <div className="absolute -top-2 -right-2 bg-indigo-600 text-white px-3 py-1 rounded-full text-[10px] font-black uppercase">Alpha Build</div>
+                  </div>
+                  <div className="space-y-2">
+                    <h2 className="text-5xl font-black text-white tracking-tighter">ANALYTICS LAB</h2>
+                    <p className="text-slate-500 max-w-xl mx-auto text-lg leading-relaxed">Neural predictive modeling and advanced bio-flux cross-referencing is being finalized in your sector.</p>
+                  </div>
+                  <div className="flex gap-4">
+                    <button onClick={() => addNotification("Access Denied. Tier L9 Required.")} className="px-10 py-4 bg-slate-900 hover:bg-slate-800 rounded-2xl text-slate-400 font-black transition-all border border-slate-800">REQUEST BYPASS</button>
+                    <button onClick={() => setView('dashboard')} className="px-10 py-4 bg-indigo-600 hover:bg-indigo-700 rounded-2xl text-white font-black transition-all shadow-2xl shadow-indigo-500/30">REVERT TO COMMAND</button>
+                  </div>
+                </div>
+              )}
+              {view === 'settings' && (
+                <div className="max-w-3xl mx-auto space-y-12 animate-in slide-in-from-bottom-12 duration-700">
+                   <div className="flex items-center gap-6">
+                      <div className="p-4 bg-slate-900 rounded-3xl border border-slate-800">
+                         <Settings size={40} className="text-indigo-400" />
+                      </div>
+                      <div>
+                        <h2 className="text-4xl font-black text-white tracking-tight">CONFIGURATION</h2>
+                        <p className="text-slate-500 font-bold uppercase tracking-widest text-xs">Node Parameters & UI Protocols</p>
+                      </div>
+                   </div>
+                  
+                  <div className="grid gap-6">
+                    {[
+                      { key: 'theme', label: 'Visual Interface', description: 'Protocol for system-wide aesthetic rendering.', options: ['Midnight Deep', 'Titanium Light', 'Neon Flux'] },
+                      { key: 'refreshRate', label: 'Pulse Frequency', description: 'Global registry refresh rate in standard seconds.', options: [10, 30, 60, 0] },
+                      { key: 'aiModel', label: 'Neural Architecture', description: 'Selection of large language model for assistant processing.', options: ['Gemini 3 Flash', 'Gemini 3 Pro'] },
+                      { key: 'notifications', label: 'Alert Protocol', description: 'Real-time broadcast for system and data updates.', type: 'toggle' },
+                    ].map((setting, i) => (
+                      <div key={i} className="flex justify-between items-center p-8 glass-panel rounded-[2rem] border-slate-800 shadow-2xl hover:bg-slate-900/30 transition-all">
+                        <div className="max-w-md">
+                          <p className="text-lg font-black text-white uppercase tracking-tight mb-1">{setting.label}</p>
+                          <p className="text-sm text-slate-500 font-medium leading-relaxed">{setting.description}</p>
+                        </div>
+                        <div className="flex gap-2">
+                           {setting.type === 'toggle' ? (
+                             <button 
+                              onClick={() => setConfig({...config, notifications: !config.notifications})}
+                              className={`w-14 h-8 rounded-full transition-all relative ${config.notifications ? 'bg-indigo-600' : 'bg-slate-800'}`}
+                             >
+                                <div className={`absolute top-1 w-6 h-6 bg-white rounded-full transition-all ${config.notifications ? 'right-1' : 'left-1'}`}></div>
+                             </button>
+                           ) : (
+                             <select 
+                                value={(config as any)[setting.key]}
+                                onChange={(e) => setConfig({...config, [setting.key]: e.target.value})}
+                                className="bg-slate-950 border border-slate-800 rounded-xl px-4 py-2 text-xs font-bold text-white focus:ring-2 focus:ring-indigo-500 transition-all outline-none"
+                             >
+                               {setting.options?.map(opt => <option key={opt} value={opt}>{opt === 0 ? 'Manual' : opt}</option>)}
+                             </select>
+                           )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="p-8 border-t border-slate-800/50 flex justify-center">
+                     <p className="text-[10px] text-slate-700 font-black uppercase tracking-[0.5em]">Nexus Software Distribution © 2024</p>
+                  </div>
+                </div>
+              )}
             </div>
           )}
+        </div>
 
-          {/* AI Insights Modal/Panel */}
-          {aiInsight && (
-            <div className="glass-panel p-6 rounded-2xl border-indigo-500/30 bg-indigo-500/5 animate-in slide-in-from-top-4 duration-500 relative group">
-              <button 
-                onClick={() => setAiInsight(null)}
-                className="absolute top-4 right-4 text-slate-500 hover:text-white transition-colors"
-              >
-                <X size={18} />
-              </button>
-              <div className="flex items-start gap-4">
-                <div className="p-3 bg-indigo-600 rounded-xl text-white">
-                  <BrainCircuit size={24} />
+        {/* Premium Streaming AI Chat Drawer */}
+        <div className={`fixed inset-y-0 right-0 z-[110] w-full max-w-lg bg-slate-950/95 backdrop-blur-3xl border-l border-slate-800 shadow-[0_0_100px_rgba(0,0,0,0.8)] transition-transform duration-700 ease-in-out ${isChatOpen ? 'translate-x-0' : 'translate-x-full'}`}>
+          <div className="flex flex-col h-full">
+            <div className="p-8 border-b border-slate-800/50 flex justify-between items-center bg-[#020617]/50">
+              <div className="flex items-center gap-4">
+                <div className="w-14 h-14 bg-gradient-to-br from-indigo-600 to-purple-700 rounded-2xl flex items-center justify-center text-white shadow-2xl shadow-indigo-500/20">
+                  <BrainCircuit size={28} className="animate-pulse" />
                 </div>
-                <div className="flex-1">
-                  <h3 className="text-lg font-bold text-white mb-2">Executive AI Summary</h3>
-                  <div className="text-slate-300 text-sm leading-relaxed whitespace-pre-wrap">
-                    {aiInsight}
+                <div>
+                  <h3 className="text-lg font-black text-white tracking-tighter uppercase">AX-9 Intelligence</h3>
+                  <div className="flex items-center gap-2">
+                    <div className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse"></div>
+                    <span className="text-[9px] text-emerald-500 font-black uppercase tracking-widest">Neural Link Established</span>
                   </div>
                 </div>
               </div>
-            </div>
-          )}
-
-          {/* KPI Cards */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
-            {loading ? (
-              Array(4).fill(0).map((_, i) => (
-                <div key={i} className="h-32 glass-panel rounded-2xl animate-pulse-subtle"></div>
-              ))
-            ) : globalStats ? (
-              <>
-                <StatCard 
-                  title="Total Cases" 
-                  value={globalStats.cases} 
-                  change={`+${formatNumber(globalStats.todayCases)}`}
-                  icon={Activity} 
-                  colorClass="bg-indigo-600" 
-                />
-                <StatCard 
-                  title="Recovered" 
-                  value={globalStats.recovered} 
-                  change={`+${formatNumber(globalStats.todayRecovered)}`}
-                  icon={Users} 
-                  colorClass="bg-emerald-600" 
-                />
-                <StatCard 
-                  title="Fatalities" 
-                  value={globalStats.deaths} 
-                  change={`+${formatNumber(globalStats.todayDeaths)}`}
-                  icon={Skull} 
-                  colorClass="bg-rose-600" 
-                />
-                <StatCard 
-                  title="Active Cases" 
-                  value={globalStats.active} 
-                  icon={TrendingUp} 
-                  colorClass="bg-amber-600" 
-                />
-              </>
-            ) : null}
-          </div>
-
-          {/* Charts Grid */}
-          <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
-            {/* Main Trend Chart */}
-            <div className="xl:col-span-2 glass-panel p-6 rounded-2xl shadow-lg flex flex-col">
-              <SectionHeader 
-                title="Global Infection Trends" 
-                description="Cumulative growth of cases and fatalities"
-                actions={
-                  <select 
-                    value={timeRange}
-                    onChange={(e) => setTimeRange(e.target.value)}
-                    className="bg-slate-800 border border-slate-700 rounded-lg text-xs text-white px-3 py-1.5 focus:ring-1 focus:ring-indigo-500"
-                  >
-                    <option value="30">Last 30 Days</option>
-                    <option value="90">Last 90 Days</option>
-                    <option value="all">Full History</option>
-                  </select>
-                }
-              />
-              <div className="flex-1 chart-container">
-                <ResponsiveContainer width="100%" height="100%">
-                  <AreaChart data={chartData}>
-                    <defs>
-                      <linearGradient id="colorCases" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="5%" stopColor="#6366f1" stopOpacity={0.3}/>
-                        <stop offset="95%" stopColor="#6366f1" stopOpacity={0}/>
-                      </linearGradient>
-                    </defs>
-                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#334155" />
-                    <XAxis 
-                      dataKey="date" 
-                      stroke="#64748b" 
-                      fontSize={12} 
-                      tickLine={false} 
-                      axisLine={false} 
-                      minTickGap={30}
-                    />
-                    <YAxis 
-                      stroke="#64748b" 
-                      fontSize={12} 
-                      tickLine={false} 
-                      axisLine={false} 
-                      tickFormatter={(val) => formatNumber(val)}
-                    />
-                    <Tooltip 
-                      contentStyle={{ backgroundColor: '#1e293b', border: '1px solid #334155', borderRadius: '12px', fontSize: '12px' }}
-                      itemStyle={{ color: '#fff' }}
-                    />
-                    <Area type="monotone" dataKey="cases" stroke="#6366f1" fillOpacity={1} fill="url(#colorCases)" strokeWidth={2} />
-                    <Area type="monotone" dataKey="deaths" stroke="#f43f5e" fill="transparent" strokeWidth={2} />
-                  </AreaChart>
-                </ResponsiveContainer>
-              </div>
+              <button onClick={() => setIsChatOpen(false)} className="p-3 text-slate-500 hover:text-white hover:bg-slate-900 rounded-xl transition-all">
+                <X size={24} />
+              </button>
             </div>
 
-            {/* Distribution Pie */}
-            <div className="glass-panel p-6 rounded-2xl shadow-lg flex flex-col">
-              <SectionHeader 
-                title="Status Breakdown" 
-                description="Global distribution ratio"
-              />
-              <div className="flex-1 chart-container flex items-center justify-center">
-                {globalStats && (
-                  <ResponsiveContainer width="100%" height="100%">
-                    <PieChart>
-                      <Pie
-                        data={[
-                          { name: 'Active', value: globalStats.active },
-                          { name: 'Recovered', value: globalStats.recovered },
-                          { name: 'Deaths', value: globalStats.deaths },
-                        ]}
-                        cx="50%"
-                        cy="50%"
-                        innerRadius={60}
-                        outerRadius={80}
-                        paddingAngle={5}
-                        dataKey="value"
-                      >
-                        {COLORS.slice(0, 3).map((entry, index) => (
-                          <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
-                        ))}
-                      </Pie>
-                      <Tooltip />
-                      <Legend verticalAlign="bottom" height={36}/>
-                    </PieChart>
-                  </ResponsiveContainer>
-                )}
-              </div>
-            </div>
-          </div>
-
-          {/* Top Countries Data Table */}
-          <div className="glass-panel rounded-2xl shadow-lg overflow-hidden">
-            <div className="p-6 border-b border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-              <div>
-                <h3 className="text-xl font-bold text-white">Geographical Breakdown</h3>
-                <p className="text-slate-400 text-sm">Detailed metrics by sovereign state</p>
-              </div>
-              <div className="flex items-center gap-3">
-                <div className="relative">
-                  <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" />
-                  <input 
-                    type="text" 
-                    placeholder="Search country..."
-                    value={searchTerm}
-                    onChange={(e) => setSearchTerm(e.target.value)}
-                    className="bg-slate-900/50 border border-slate-700 rounded-lg pl-9 pr-4 py-2 text-xs text-white focus:outline-none focus:ring-1 focus:ring-indigo-500 w-full sm:w-48"
-                  />
+            <div className="flex-1 overflow-y-auto p-8 space-y-6 no-scrollbar bg-gradient-to-b from-transparent to-slate-950/20">
+              {chatMessages.length === 0 && (
+                <div className="h-full flex flex-col items-center justify-center text-center space-y-6 px-12 opacity-40">
+                  <div className="p-8 bg-slate-900/50 rounded-full border border-slate-800">
+                    <MessageSquare size={50} className="text-slate-700" />
+                  </div>
+                  <div>
+                    <p className="text-xl font-black text-white uppercase tracking-tight">Awaiting Input</p>
+                    <p className="text-sm text-slate-500 font-medium leading-relaxed">Ask AX-9 about current bio-trends, specific territory analysis, or global restoration metrics.</p>
+                  </div>
                 </div>
-                <button className="p-2 bg-slate-800 hover:bg-slate-700 rounded-lg text-slate-300 transition-colors">
-                  <Download size={18} />
+              )}
+              {chatMessages.map((msg, i) => (
+                <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'} animate-in slide-in-from-bottom-2 duration-300`}>
+                  <div className={`max-w-[90%] px-6 py-4 rounded-[2rem] text-sm leading-relaxed shadow-xl ${msg.role === 'user' ? 'bg-indigo-600 text-white rounded-tr-none font-bold' : 'bg-slate-900/80 text-slate-200 rounded-tl-none border border-slate-800 font-medium'}`}>
+                    {msg.text}
+                    {msg.isStreaming && <span className="inline-block w-2 h-4 bg-indigo-500 ml-1 animate-pulse"></span>}
+                  </div>
+                </div>
+              ))}
+              {isAiTyping && chatMessages.length > 0 && chatMessages[chatMessages.length - 1].isStreaming === false && (
+                <div className="flex justify-start">
+                  <div className="bg-slate-900/50 text-slate-500 px-6 py-4 rounded-3xl rounded-tl-none border border-slate-800/50 text-xs font-black italic animate-pulse uppercase tracking-widest">
+                    Consulting Data Cluster...
+                  </div>
+                </div>
+              )}
+              <div ref={chatEndRef} />
+            </div>
+
+            <div className="p-10 bg-[#020617]/80 border-t border-slate-800/50 backdrop-blur-xl">
+              <div className="relative group">
+                <div className="absolute -inset-1 bg-gradient-to-r from-indigo-500 to-purple-600 rounded-[2rem] blur opacity-20 group-focus-within:opacity-40 transition duration-1000"></div>
+                <input 
+                  type="text" 
+                  placeholder="Inquire with AX-9 Interface..." 
+                  value={chatInput}
+                  onChange={(e) => setChatInput(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && sendMessage()}
+                  className="relative w-full bg-slate-950 border border-slate-800 rounded-[2rem] pl-8 pr-16 py-6 text-sm text-white focus:ring-2 focus:ring-indigo-500 transition-all outline-none font-medium placeholder:text-slate-700"
+                />
+                <button 
+                  onClick={sendMessage}
+                  disabled={!chatInput.trim() || isAiTyping}
+                  className="absolute right-4 top-1/2 -translate-y-1/2 w-12 h-12 bg-indigo-600 hover:bg-indigo-500 text-white rounded-2xl flex items-center justify-center shadow-2xl transition-all disabled:opacity-30 disabled:scale-95 active:scale-90"
+                >
+                  <Send size={20} />
                 </button>
               </div>
-            </div>
-            
-            <div className="overflow-x-auto">
-              <table className="w-full text-left">
-                <thead className="bg-slate-800/50 text-slate-400 text-[10px] uppercase tracking-wider">
-                  <tr>
-                    <th className="px-6 py-4 font-semibold">Country</th>
-                    <th className="px-6 py-4 font-semibold cursor-pointer group" onClick={() => toggleSort('cases')}>
-                      <div className="flex items-center gap-1">
-                        Cases {sortKey === 'cases' && (sortOrder === 'desc' ? <ChevronDown size={14}/> : <ChevronUp size={14}/>)}
-                      </div>
-                    </th>
-                    <th className="px-6 py-4 font-semibold cursor-pointer group" onClick={() => toggleSort('active')}>
-                      <div className="flex items-center gap-1">
-                        Active {sortKey === 'active' && (sortOrder === 'desc' ? <ChevronDown size={14}/> : <ChevronUp size={14}/>)}
-                      </div>
-                    </th>
-                    <th className="px-6 py-4 font-semibold cursor-pointer group" onClick={() => toggleSort('deaths')}>
-                      <div className="flex items-center gap-1">
-                        Fatalities {sortKey === 'deaths' && (sortOrder === 'desc' ? <ChevronDown size={14}/> : <ChevronUp size={14}/>)}
-                      </div>
-                    </th>
-                    <th className="px-6 py-4 font-semibold cursor-pointer group" onClick={() => toggleSort('recovered')}>
-                      <div className="flex items-center gap-1">
-                        Recovered {sortKey === 'recovered' && (sortOrder === 'desc' ? <ChevronDown size={14}/> : <ChevronUp size={14}/>)}
-                      </div>
-                    </th>
-                    <th className="px-6 py-4 font-semibold">Trend</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-800">
-                  {loading ? (
-                    Array(5).fill(0).map((_, i) => (
-                      <tr key={i} className="animate-pulse">
-                        <td colSpan={6} className="px-6 py-4"><div className="h-8 bg-slate-800/50 rounded-lg"></div></td>
-                      </tr>
-                    ))
-                  ) : filteredAndSortedCountries.length > 0 ? (
-                    filteredAndSortedCountries.map((c) => (
-                      <tr key={c.country} className="hover:bg-slate-800/30 transition-colors">
-                        <td className="px-6 py-4">
-                          <div className="flex items-center gap-3">
-                            <img src={c.countryInfo.flag} alt={c.country} className="w-6 h-4 object-cover rounded shadow-sm" />
-                            <span className="text-sm font-medium text-white">{c.country}</span>
-                          </div>
-                        </td>
-                        <td className="px-6 py-4 text-sm text-slate-300">{formatNumber(c.cases)}</td>
-                        <td className="px-6 py-4 text-sm text-slate-300">
-                          <span className="px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-400 border border-amber-500/20 text-[10px] font-bold">
-                            {formatNumber(c.active)}
-                          </span>
-                        </td>
-                        <td className="px-6 py-4 text-sm text-rose-400 font-medium">{formatNumber(c.deaths)}</td>
-                        <td className="px-6 py-4 text-sm text-emerald-400 font-medium">{formatNumber(c.recovered)}</td>
-                        <td className="px-6 py-4">
-                          <div className="w-24 h-8">
-                             <ResponsiveContainer width="100%" height="100%">
-                              <LineChart data={[{v: 0}, {v: c.cases}, {v: c.cases * 1.1}]}>
-                                <Line type="monotone" dataKey="v" stroke={c.cases > 1000000 ? "#f43f5e" : "#10b981"} strokeWidth={2} dot={false} />
-                              </LineChart>
-                            </ResponsiveContainer>
-                          </div>
-                        </td>
-                      </tr>
-                    ))
-                  ) : (
-                    <tr>
-                      <td colSpan={6} className="px-6 py-12 text-center text-slate-500 italic">No data matching your criteria found.</td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
-            <div className="p-4 border-t border-slate-800 bg-slate-900/30 flex items-center justify-between text-xs text-slate-500">
-              <p>Showing top {filteredAndSortedCountries.length} countries based on current sorting</p>
-              <div className="flex gap-2">
-                <button className="px-3 py-1 bg-slate-800 hover:bg-slate-700 rounded border border-slate-700 disabled:opacity-50">Prev</button>
-                <button className="px-3 py-1 bg-slate-800 hover:bg-slate-700 rounded border border-slate-700 disabled:opacity-50">Next</button>
-              </div>
+              <p className="text-[10px] text-center text-slate-700 mt-6 uppercase tracking-[0.4em] font-black">Secure Quantum-Encrypted Neural Link</p>
             </div>
           </div>
         </div>
       </main>
-
-      {/* Floating Action Menu for Mobile */}
-      <div className="lg:hidden fixed bottom-6 right-6">
-        <button className="w-14 h-14 bg-indigo-600 rounded-full flex items-center justify-center text-white shadow-2xl shadow-indigo-500/40 border border-indigo-400/20 active:scale-95 transition-all">
-          <MoreVertical size={24} />
-        </button>
-      </div>
     </div>
   );
 };
